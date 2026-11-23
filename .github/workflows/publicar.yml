@@ -1,0 +1,119 @@
+# Quando __version__ (desktop/pons/__init__.py) muda na branch main, gera no Windows o executável e o instalador,
+# testa os dois e publica como Release "vX.Y.Z". O Pons instalado detecta a nova versão sozinho.
+name: Publicar versão
+
+on:
+  push:
+    branches: [main]
+    # só publica se a versão ainda não tiver Release (senão termina em segundos)
+    paths: ["desktop/**", ".github/workflows/publicar.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publicar
+  cancel-in-progress: true
+
+jobs:
+  publicar:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Conferir versão
+        id: versao
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(python -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"',open('pons/__init__.py',encoding='utf-8').read()).group(1))")
+          echo "VERSAO=$V" >> $GITHUB_ENV
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "A versão $V já foi publicada — nada a fazer."; echo "publicar=nao" >> $GITHUB_OUTPUT
+          else
+            echo "Publicando a versão $V"; echo "publicar=sim" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Dependências
+        if: steps.versao.outputs.publicar == 'sim'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Inno Setup
+        if: steps.versao.outputs.publicar == 'sim'
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Autoteste no código-fonte
+        if: steps.versao.outputs.publicar == 'sim'
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          c=0; python main.py --selftest selftest-fonte.txt || c=$?
+          echo "Código de saída: $c"; exit $c
+
+      - name: Versão anterior (base da atualização pequena)
+        if: steps.versao.outputs.publicar == 'sim'
+        shell: pwsh
+        run: ./tools/ci_base.ps1
+
+      - name: Gerar executável, instalador e atualização pequena
+        if: steps.versao.outputs.publicar == 'sim'
+        shell: bash
+        run: python build.py --publicar --base-dir base-anterior --base-versao "$BASE_VERSAO"
+
+      - name: Autoteste do executável gerado (sem Python)
+        if: steps.versao.outputs.publicar == 'sim'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Pons\Pons.exe" -ArgumentList "--selftest","selftest.txt" -PassThru
+          if (-not $p.WaitForExit(600000)) { Get-Content selftest.txt; $p | Stop-Process -Force; Write-Error "Autoteste travou"; exit 1 }
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { Write-Error "Autoteste do executável falhou"; exit 1 }
+
+      - name: Teste do instalador (instala em silêncio, testa e desinstala)
+        if: steps.versao.outputs.publicar == 'sim'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = Resolve-Path "Saida\Pons-Setup-$env:VERSAO.exe"
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru; $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "Falha na instalação ($($p.ExitCode))" }
+          Start-Sleep 4; Get-Process Pons -ErrorAction SilentlyContinue | Stop-Process -Force
+          $key = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{9D70FD3B-086F-4A02-831F-3CC3A4DE93EA}_is1"
+          $dir = (Get-ItemProperty $key).InstallLocation
+          Write-Host "Instalado em $dir — versão $((Get-ItemProperty $key).DisplayVersion)"
+          $p = Start-Process (Join-Path $dir "Pons.exe") -ArgumentList "--selftest","selftest-instalado.txt" -PassThru
+          if (-not $p.WaitForExit(600000)) { Get-Content selftest-instalado.txt; $p | Stop-Process -Force; throw "Autoteste travou" }
+          Get-Content selftest-instalado.txt
+          if ($p.ExitCode -ne 0) { throw "Autoteste do programa instalado falhou" }
+          $p = Start-Process (Join-Path $dir "unins000.exe") -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -PassThru; $p.WaitForExit()
+
+      - name: Teste da atualização pequena (versão anterior aberta -> esta versão)
+        if: steps.versao.outputs.publicar == 'sim'
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./tools/ci_testar_patch.ps1 -Versao $env:VERSAO
+
+      - name: Publicar Release
+        if: steps.versao.outputs.publicar == 'sim'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp "Saida/Pons-Setup-$VERSAO.exe" Saida/Pons-Setup.exe
+          gh release create "v$VERSAO" Saida/*.exe Saida/versao.json \
+            --title "Pons $VERSAO" --notes-file Saida/NOTAS.md --latest

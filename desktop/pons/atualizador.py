@@ -1,0 +1,315 @@
+"""Atualização automática: consulta o versao.json da última Release no GitHub, baixa o instalador
+, confere o SHA-256, instala em modo silencioso e reabre o programa."""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar,
+                               QPushButton, QTextBrowser, QVBoxLayout)
+
+from . import APP_NAME, UPDATE_REPO, __version__
+
+
+def fmt_bytes(n):
+    n = float(n or 0)
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB":
+            return f"{n:.0f} {u}" if u in ("B", "KB") else f"{n:.1f} {u}".replace(".", ",")
+        n /= 1024
+
+
+class Baixar(QThread):
+    """Baixa um arquivo com progresso (0–1)."""
+    progresso = Signal(float)
+    terminou = Signal(str, str)          # caminho, erro
+
+    def __init__(self, url, pasta):
+        super().__init__()
+        self.url, self.pasta = url, pasta
+        self.parar = False
+
+    def run(self):
+        try:
+            os.makedirs(self.pasta, exist_ok=True)
+            destino = os.path.join(self.pasta, self.url.rsplit("/", 1)[-1] or "instalador.exe")
+            req = urllib.request.Request(self.url, headers={"User-Agent": f"{APP_NAME}/{__version__}"})
+            with urllib.request.urlopen(req, timeout=30) as r, open(destino, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                lido = 0
+                while not self.parar:
+                    bloco = r.read(1 << 16)
+                    if not bloco:
+                        break
+                    f.write(bloco)
+                    lido += len(bloco)
+                    if total:
+                        self.progresso.emit(lido / total)
+            self.terminou.emit("" if self.parar else destino, "cancelado" if self.parar else "")
+        except Exception as e:  # noqa: BLE001
+            self.terminou.emit("", str(e))
+
+URL_VERSAO = f"https://github.com/{UPDATE_REPO}/releases/latest/download/versao.json"
+LOG_INSTALACAO = os.path.join(tempfile.gettempdir(), "Pons-instalacao.log")
+MARCADOR = os.path.join(tempfile.gettempdir(), "Pons-atualizacao.json")
+# sem /SUPPRESSMSGBOXES: se algo der errado, o usuário vê o motivo e pode "Tentar novamente"
+ARGS_INSTALADOR = ["/SILENT", "/NORESTART", "/CLOSEAPPLICATIONS", f"/LOG={LOG_INSTALACAO}"]
+
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
+
+
+def buscar_info(timeout=10):
+    req = urllib.request.Request(URL_VERSAO, headers={"User-Agent": f"{APP_NAME}/{__version__}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+class ThreadVerificar(QThread):
+    resultado = Signal(object, str)
+
+    def run(self):
+        try:
+            self.resultado.emit(buscar_info(), "")
+        except Exception as e:  # noqa: BLE001
+            self.resultado.emit(None, str(e))
+
+
+def sha256(caminho):
+    h = hashlib.sha256()
+    with open(caminho, "rb") as f:
+        for bloco in iter(lambda: f.read(1 << 20), b""):
+            h.update(bloco)
+    return h.hexdigest()
+
+
+def executar_instalador(caminho, versao_alvo="", pequena=False):
+    """Agenda o instalador para depois que o programa fechar (ele reabre o programa ao terminar)."""
+    try:
+        with open(MARCADOR, "w", encoding="utf-8") as f:
+            # se a atualização pequena falhar, a instalação manual usa o instalador completo (baixado do site)
+            json.dump({"de": __version__, "para": versao_alvo, "instalador": "" if pequena else caminho,
+                       "quando": time.time()}, f)
+    except OSError:
+        pass
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        subprocess.Popen([caminho] + ARGS_INSTALADOR)
+        return
+    subprocess.Popen([sys.executable, "--run-update", caminho, str(os.getpid())], close_fds=True,
+                     creationflags=0x00000008 | 0x00000200)  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
+
+def ajudante_atualizacao(argv):
+    """Pons.exe --run-update <instalador> <pid>: espera o programa fechar e inicia a instalação."""
+    i = argv.index("--run-update")
+    caminho = argv[i + 1]
+    pid = int(argv[i + 2]) if len(argv) > i + 2 else 0
+    if sys.platform == "win32" and pid:
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.windll.kernel32
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if h:
+            k.WaitForSingleObject(h, 30000)
+            k.CloseHandle(h)
+    time.sleep(1.0)
+    # o instalador encerra qualquer Pons que ainda estiver aberto antes de copiar os arquivos
+    subprocess.Popen([caminho] + ARGS_INSTALADOR, close_fds=True)
+    return 0
+
+
+def resultado_da_ultima_atualizacao():
+    """Depois de reabrir: None (nada pendente/sucesso) ou dict com a tentativa que falhou."""
+    try:
+        with open(MARCADOR, encoding="utf-8") as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.remove(MARCADOR)
+    except OSError:
+        pass
+    if not info.get("para") or vtuple(__version__) >= vtuple(info["para"]):
+        return None
+    linhas = []
+    try:
+        with open(LOG_INSTALACAO, encoding="utf-8", errors="replace") as f:
+            linhas = [l.rstrip() for l in f if re.search(r"rror|failed|denied|negado|Abort|ollback|in use|Message box", l)]
+    except OSError:
+        pass
+    info["erros"] = linhas[-8:]
+    return info
+
+
+def avisar_falha(janela, info):
+    """Mostra o motivo e oferece a instalação normal (com janelas), que mostra o erro na tela."""
+    detalhes = "\n".join(e.split("   ", 1)[-1] for e in info.get("erros", [])) or "O instalador não informou o motivo."
+    caixa = QMessageBox(janela)
+    caixa.setIcon(QMessageBox.Warning)
+    caixa.setWindowTitle(APP_NAME)
+    caixa.setText(f"<b>A atualização para a versão {info['para']} não foi concluída.</b>")
+    caixa.setInformativeText(
+        "O Windows desfez a instalação. A causa mais comum é o antivírus bloquear o novo arquivo do programa.\n\n"
+        "Clique em \"Instalar manualmente\" para abrir o instalador normal, que mostra o erro na tela. "
+        "Se o antivírus avisar, permita o Pons.")
+    caixa.setDetailedText(f"{detalhes}\n\nLog completo: {LOG_INSTALACAO}")
+    manual = caixa.addButton("Instalar manualmente", QMessageBox.AcceptRole)
+    caixa.addButton("Agora não", QMessageBox.RejectRole)
+    caixa.exec()
+    if caixa.clickedButton() is manual:
+        instalador = info.get("instalador", "")
+        if instalador and os.path.exists(instalador):
+            janela.fechar_para_atualizar()
+            subprocess.Popen([instalador, f"/LOG={LOG_INSTALACAO}"], close_fds=True)
+            QApplication.instance().quit()
+        else:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(f"https://github.com/{UPDATE_REPO}/releases/latest/download/Pons-Setup.exe"))
+
+
+class DialogoAtualizacao(QDialog):
+    def __init__(self, janela, info):
+        super().__init__(janela)
+        self.janela, self.info = janela, info
+        self.setWindowTitle(f"Atualização do {APP_NAME}")
+        self.setMinimumWidth(500)
+        pequena = (info.get("patches") or {}).get(__version__)
+        inst = pequena or info["instalador"]
+        self.pequena = bool(pequena)
+        self.url, self.sha = inst["url"], inst["sha256"]
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"<h3 style='margin:0'>Nova versão disponível: {info['versao']}</h3>"
+                             f"<p>Você está usando a versão {__version__}.</p>"))
+        notas = QTextBrowser()
+        notas.setMarkdown(info.get("novidades") or "Melhorias e correções.")
+        notas.setMaximumHeight(200)
+        lay.addWidget(QLabel("<b>Novidades</b>"))
+        lay.addWidget(notas)
+        oque = "Será baixada só a parte que mudou" if pequena else "Será baixado o instalador"
+        dica = QLabel(f"{oque} ({fmt_bytes(inst.get('tamanho'))}). "
+                      f"O {APP_NAME} será fechado, atualizado e aberto de novo.")
+        dica.setWordWrap(True)
+        dica.setObjectName("Muted")
+        lay.addWidget(dica)
+        self.barra = QProgressBar(maximum=1000)
+        self.barra.hide()
+        lay.addWidget(self.barra)
+        linha = QHBoxLayout()
+        self.bt_pular = QPushButton("Pular esta versão")
+        self.bt_depois = QPushButton("Lembrar depois")
+        self.bt_agora = QPushButton("Atualizar agora")
+        self.bt_agora.setObjectName("Primary")
+        linha.addWidget(self.bt_pular)
+        linha.addStretch()
+        linha.addWidget(self.bt_depois)
+        linha.addWidget(self.bt_agora)
+        lay.addLayout(linha)
+        self.bt_pular.clicked.connect(self._pular)
+        self.bt_depois.clicked.connect(self.reject)
+        self.bt_agora.clicked.connect(self._iniciar)
+        self.dl: Baixar | None = None
+
+    def _pular(self):
+        self.janela.settings.setValue("pular_versao", self.info["versao"])
+        self.reject()
+
+    def _iniciar(self):
+        if sys.platform != "win32" or not getattr(sys, "frozen", False):
+            QMessageBox.information(self, APP_NAME, "A atualização automática funciona no programa instalado.\n"
+                                                    f"Baixe manualmente em:\n{self.url}")
+            return
+        for b in (self.bt_pular, self.bt_depois, self.bt_agora):
+            b.setEnabled(False)
+        self.barra.show()
+        pasta = os.path.join(tempfile.gettempdir(), "Pons-atualizacao")
+        shutil.rmtree(pasta, ignore_errors=True)
+        self.dl = Baixar(self.url, pasta)
+        self.dl.progresso.connect(lambda p: self.barra.setValue(int(p * 1000)))
+        self.dl.terminou.connect(self._baixou)
+        self.dl.start()
+
+    def _baixou(self, caminho, erro):
+        if erro or not caminho:
+            if erro != "cancelado":
+                self._falhou(erro)
+            return
+        if sha256(caminho).lower() != self.sha.lower():
+            os.remove(caminho)
+            self._falhou("O arquivo baixado está corrompido (SHA-256 não confere). Tente novamente.")
+            return
+        self.accept()
+        self.janela.fechar_para_atualizar()
+        executar_instalador(caminho, self.info["versao"], self.pequena)
+        QApplication.instance().quit()
+
+    def _falhou(self, erro):
+        QMessageBox.critical(self, APP_NAME, f"Não foi possível baixar a atualização:\n{erro}")
+        for b in (self.bt_pular, self.bt_depois, self.bt_agora):
+            b.setEnabled(True)
+        self.barra.hide()
+
+    def reject(self):
+        if self.dl and self.dl.isRunning():
+            self.dl.parar = True
+            self.dl.wait(3000)
+        super().reject()
+
+
+class Atualizador:
+    def __init__(self, janela):
+        self.janela = janela
+        self.th = None
+        self._mostrando = False
+        self._timer = None
+
+    def verificar_auto(self):
+        """Verifica ao abrir e depois a cada 4 horas enquanto o programa estiver aberto."""
+        if self.janela.settings.value("auto_atualizar", "true") == "false":
+            return
+        self.verificar(silencioso=True)
+        if not self._timer:
+            self._timer = QTimer(self.janela, interval=4 * 3600 * 1000, timeout=lambda: self.verificar(True))
+            self._timer.start()
+
+    def verificar(self, silencioso=False):
+        if self.th and self.th.isRunning():
+            return
+        self.th = ThreadVerificar()
+        self.th.resultado.connect(lambda info, err: self._resultado(info, err, silencioso))
+        self.th.start()
+        if not silencioso and hasattr(self.janela, "statusBar"):
+            self.janela.statusBar().showMessage("Verificando atualizações…", 4000)
+
+    def _resultado(self, info, err, silencioso):
+        if err or not info:
+            if not silencioso:
+                QMessageBox.warning(self.janela, APP_NAME, f"Não foi possível verificar atualizações.\n{err}")
+            return
+        nova = info.get("versao", "0")
+        if vtuple(nova) <= vtuple(__version__):
+            if not silencioso:
+                QMessageBox.information(self.janela, APP_NAME,
+                                        f"Você já está usando a versão mais recente ({__version__}).")
+            return
+        if silencioso and self.janela.settings.value("pular_versao", "") == nova:
+            return
+        if self._mostrando:
+            return
+        self._mostrando = True
+        try:
+            DialogoAtualizacao(self.janela, info).exec()
+        finally:
+            self._mostrando = False
