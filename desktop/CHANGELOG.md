@@ -1,5 +1,8 @@
 # Novidades do Pons (computador)
 
+## 1.0.1
+- Ícone novo: celular e computador ligados.
+
 ## 1.0.0
 - Primeira versão: ponte entre o celular e o computador pelo Wi-Fi, sem cabo e sem internet.
 - Pareamento com QR, tudo cifrado (AES-256) e só na sua rede.

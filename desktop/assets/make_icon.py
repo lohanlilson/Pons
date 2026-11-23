@@ -208,8 +208,165 @@ def opcao_vaivem():
     return acabar(img)
 
 
-OPCOES = {"a": opcao_ponte, "b": opcao_aparelhos, "c": opcao_vaivem}
-ESCOLHA = "a"
+def _celular(x0, y0, x1, y1, r=44):
+    m = ImageChops.subtract(_rr(x0, y0, x1, y1, r), _rr(x0 + 24, y0 + 40, x1 - 24, y1 - 58, 14))
+    cx = (x0 + x1) / 2
+    return arredondar(ImageChops.add(m, _rr(cx - 22, y1 - 40, cx + 22, y1 - 26, 7)), 4 * U)
+
+
+def _monitor(x0, y0, x1, y1, pe=True):
+    m = ImageChops.subtract(_rr(x0, y0, x1, y1, 34), _rr(x0 + 30, y0 + 30, x1 - 30, y1 - 30, 12))
+    if pe:
+        cx = (x0 + x1) / 2
+        m = ImageChops.add(m, _retangulos([(cx - 30, y1, cx + 30, y1 + 90), (cx - 100, y1 + 80, cx + 100, y1 + 116)], 10))
+    return arredondar(m, 4 * U)
+
+
+def _bola(x, y, r):
+    p = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(p).ellipse(u(x - r, y - r, x + r, y + r), fill=255)
+    return p
+
+
+# B1: celular e monitor lado a lado, ligados por um arco de pontos dourados
+def opcao_b1():
+    img = fundo()
+    vidro(img, _celular(160, 440, 380, 830))
+    vidro(img, _monitor(450, 330, 870, 640))
+    m = Image.new("L", (S, S), 0)
+    for i in range(7):
+        a = math.radians(200 + i * 23.3)
+        m = ImageChops.add(m, _bola(415 + 175 * math.cos(a), 470 + 175 * math.sin(a), 15 + i * 1.3))
+    _dourado(img, m)
+    return acabar(img)
+
+
+# B2: celular na frente do monitor (sobreposto), com seta dourada de vai e volta na tela
+def opcao_b2():
+    img = fundo()
+    vidro(img, _monitor(140, 230, 760, 650))
+    cel = _celular(600, 420, 860, 860)
+    # "recorta" o monitor atrás do celular com a cor do fundo
+    buraco = arredondar(_rr(580, 400, 880, 880, 56), 2 * U)
+    img.alpha_composite(preencher(buraco, (40, 24, 110)))
+    vidro(img, cel)
+    setas = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(setas)
+    d.rectangle(u(240, 380, 470, 420), fill=255)
+    d.polygon([tuple(u(470, 340)), tuple(u(540, 400)), tuple(u(470, 460))], fill=255)
+    d.rectangle(u(290, 490, 520, 530), fill=255)
+    d.polygon([tuple(u(290, 450)), tuple(u(220, 510)), tuple(u(290, 570))], fill=255)
+    _dourado(img, arredondar(setas, 8 * U))
+    return acabar(img)
+
+
+# B3: celular e monitor unidos por uma ponte dourada (o nome Pons = ponte)
+def opcao_b3():
+    img = fundo()
+    vidro(img, _celular(110, 500, 300, 850))
+    vidro(img, _monitor(560, 380, 910, 640))
+    cx, deck, rx, ry = 430, 600, 130, 130
+    arco = arredondar(_arco(cx, deck, rx, ry, 40, 180, 360), 10 * U)
+    tir = _retangulos([(x - 8, deck - (ry - 20) * math.sqrt(max(0, 1 - ((x - cx) / (rx - 20)) ** 2)), x + 8, deck)
+                       for x in (370, 400, 430, 460, 490)], 5)
+    tab = _retangulos([(300, deck - 4, 560, deck + 30)], 10)
+    _dourado(img, ImageChops.add(ImageChops.add(arco, tir), tab))
+    return acabar(img)
+
+
+# B4: celular e monitor com ondas de sinal douradas saindo do celular
+def opcao_b4():
+    img = fundo()
+    vidro(img, _celular(150, 440, 370, 830))
+    vidro(img, _monitor(560, 330, 900, 600))
+    m = Image.new("L", (S, S), 0)
+    for r in (60, 115, 170):
+        m = ImageChops.add(m, _arco(390, 560, r, r, 30, 300, 360))
+    m = ImageChops.add(m, _bola(390, 560, 24))
+    _dourado(img, arredondar(m, 8 * U))
+    return acabar(img)
+
+
+def _pontos(cx, cy, r, a0, a1, n, rmin, rmax, ry=None):
+    ry = ry or r
+    m = Image.new("L", (S, S), 0)
+    for i in range(n):
+        t = i / (n - 1)
+        a = math.radians(a0 + (a1 - a0) * t)
+        m = ImageChops.add(m, _bola(cx + r * math.cos(a), cy + ry * math.sin(a), rmin + (rmax - rmin) * t))
+    return m
+
+
+def _notebook(x0, y0, x1, y1):
+    tela = ImageChops.subtract(_rr(x0 + 40, y0, x1 - 40, y1, 28), _rr(x0 + 68, y0 + 28, x1 - 68, y1 - 26, 10))
+    base = _rr(x0, y1 + 8, x1, y1 + 52, 18)
+    return arredondar(ImageChops.add(tela, base), 4 * U)
+
+
+# B1a: arco alto de pontos crescendo do celular até o monitor
+def opcao_b1a():
+    img = fundo()
+    vidro(img, _celular(150, 470, 360, 840))
+    vidro(img, _monitor(470, 380, 880, 680))
+    _dourado(img, _pontos(470, 470, 220, 200, 330, 9, 12, 26, 200))
+    return acabar(img)
+
+
+# B1b: dois arcos de pontos (vai e volta): dourado por cima, lilás por baixo
+def opcao_b1b():
+    img = fundo()
+    vidro(img, _celular(140, 430, 350, 800))
+    vidro(img, _monitor(480, 340, 880, 640))
+    _dourado(img, _pontos(415, 430, 170, 205, 335, 7, 13, 22))
+    lil = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    lil.alpha_composite(preencher(_pontos(415, 700, 150, 25, 155, 6, 12, 19), (200, 175, 255)))
+    img.alpha_composite(brilho(lil, 20, 1))
+    img.alpha_composite(lil)
+    return acabar(img)
+
+
+# B1c: pontos dourados que viram uma seta chegando no monitor
+def opcao_b1c():
+    img = fundo()
+    vidro(img, _celular(150, 450, 360, 830))
+    vidro(img, _monitor(480, 360, 880, 660))
+    m = _pontos(440, 470, 190, 205, 300, 6, 12, 20)
+    a = math.radians(318)
+    px, py = 440 + 190 * math.cos(a), 470 + 190 * math.sin(a)
+    d = ImageDraw.Draw(m)
+    d.polygon([tuple(u(px - 40, py - 50)), tuple(u(px + 52, py + 8)), tuple(u(px - 40, py + 52))], fill=255)
+    _dourado(img, arredondar(m, 6 * U))
+    return acabar(img)
+
+
+# B1d: celular e notebook com arco de pontos
+def opcao_b1d():
+    img = fundo()
+    vidro(img, _celular(130, 470, 330, 830))
+    vidro(img, _notebook(430, 440, 900, 720))
+    _dourado(img, _pontos(450, 480, 180, 205, 330, 7, 12, 24))
+    return acabar(img)
+
+
+# B1e: aparelhos maiores e arco de pontos indo do dourado ao lilás
+def opcao_b1e():
+    img = fundo()
+    vidro(img, _celular(110, 430, 350, 870))
+    vidro(img, _monitor(440, 360, 920, 700))
+    cores = [(255, 182, 80), (255, 160, 110), (240, 150, 170), (215, 150, 230), (190, 150, 255), (170, 150, 255), (150, 160, 255)]
+    r = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    for i, c in enumerate(cores):
+        a = math.radians(205 + i * 21)
+        r.alpha_composite(preencher(_bola(400 + 175 * math.cos(a), 450 + 160 * math.sin(a), 22 - i), c))
+    img.alpha_composite(brilho(r, 22, 2))
+    img.alpha_composite(r)
+    return acabar(img)
+
+
+OPCOES = {"a": opcao_ponte, "b": opcao_aparelhos, "c": opcao_vaivem,
+          "b1": opcao_b1, "b2": opcao_b2, "b3": opcao_b3, "b4": opcao_b4,
+          "b1a": opcao_b1a, "b1b": opcao_b1b, "b1c": opcao_b1c, "b1d": opcao_b1d, "b1e": opcao_b1e}
+ESCOLHA = "b1c"
 
 
 def icone():
@@ -228,9 +385,10 @@ if __name__ == "__main__":
     import sys
     aqui = os.path.dirname(os.path.abspath(__file__))
     if len(sys.argv) > 1 and sys.argv[1] == "opcoes":
-        quadro = Image.new("RGBA", (3 * 440 + 40, 520), (245, 243, 250, 255))
+        lista = sys.argv[2].split(",") if len(sys.argv) > 2 else ["a", "b", "c"]
+        quadro = Image.new("RGBA", (len(lista) * 440 + 40, 520), (245, 243, 250, 255))
         dq = ImageDraw.Draw(quadro)
-        for i, k in enumerate("abc"):
+        for i, k in enumerate(lista):
             quadro.alpha_composite(OPCOES[k]().resize((400, 400), Image.LANCZOS), (40 + i * 440, 30))
             dq.text((40 + i * 440 + 190, 450), k.upper(), fill=(40, 20, 90))
         quadro.convert("RGB").save(os.path.join(aqui, "opcoes.png"))
